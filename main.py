@@ -1,78 +1,99 @@
-import time
 import asyncio
-import aiohttp
-from datetime import datetime, timedelta
-from telegram import Bot
+import httpx
 from fastapi import FastAPI
-import uvicorn
+from telegram import Bot
+import os
+
+# Replace with your actual bot token and chat ID
+TELEGRAM_BOT_TOKEN = "7934074261:AAFtAdnwJKLh_iercRs-qtvqknTmLKG0vV4"
+TELEGRAM_CHAT_ID = "7559598079"
 
 app = FastAPI()
-
-TELEGRAM_BOT_TOKEN = 'your_telegram_bot_token'
-TELEGRAM_CHAT_ID = 'your_chat_id'
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-BYBIT_BASE_URL = 'https://api.bybit.com'
+bybit_base_url = "https://api.bybit.com"
 
-HEADERS = {
-    'User-Agent': 'volume-alert-bot'
-}
-
-CHECK_INTERVAL = 60  # seconds
-
+# Fetch all USDT perp futures symbols
 async def fetch_symbols(session):
-    url = f"{BYBIT_BASE_URL}/v5/market/instruments-info?category=linear"
-    async with session.get(url, headers=HEADERS) as resp:
+    url = f"{bybit_base_url}/v5/market/instruments-info?category=linear"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+    }
+    async with session.get(url, headers=headers) as resp:
+        resp.raise_for_status()
         data = await resp.json()
-        return [item['symbol'] for item in data['result']['list'] if 'USDT' in item['symbol']]
+        symbols = [
+            i["symbol"] for i in data["result"]["list"]
+            if "USDT" in i["symbol"] and i["symbol"].endswith("USDT")
+        ]
+        return symbols
 
-async def fetch_candles(session, symbol):
-    url = f"{BYBIT_BASE_URL}/v5/market/kline?category=linear&symbol={symbol}&interval=1&limit=35"
-    async with session.get(url, headers=HEADERS) as resp:
+# Fetch recent kline data for a symbol
+async def fetch_kline(session, symbol):
+    url = f"{bybit_base_url}/v5/market/kline?category=linear&symbol={symbol}&interval=1&limit=32"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+    }
+    async with session.get(url, headers=headers) as resp:
+        resp.raise_for_status()
         data = await resp.json()
-        return data['result']['list']
+        return data["result"]["list"]
 
-async def check_volume_spike(session, symbol):
-    try:
-        candles = await fetch_candles(session, symbol)
-        if len(candles) < 32:
-            return
-
-        last_candle = candles[-3]  # Candle X (3rd last)
-        volume_x = float(last_candle[5])
-        high_x = float(last_candle[3])
-        low_x = float(last_candle[4])
-        avg_volume = sum(float(c[5]) for c in candles[-33:-3]) / 30
-
-        if volume_x >= 2 * avg_volume:
-            price_1 = float(candles[-2][1])
-            price_2 = float(candles[-1][1])
-            if low_x <= price_1 <= high_x and low_x <= price_2 <= high_x:
-                message = (
-                    f"🔔 Volume Spike Alert on {symbol}\n"
-                    f"Time: {datetime.utcfromtimestamp(int(last_candle[0]) / 1000)} UTC\n"
-                    f"Volume: {volume_x:.2f} (avg: {avg_volume:.2f})\n"
-                    f"Price Range: {low_x:.4f} - {high_x:.4f}"
-                )
-                await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-    except Exception as e:
-        print(f"Error checking {symbol}: {e}")
-
+# Core monitoring logic
 async def monitor():
-    while True:
-        async with aiohttp.ClientSession() as session:
-            symbols = await fetch_symbols(session)
-            tasks = [check_volume_spike(session, symbol) for symbol in symbols]
-            await asyncio.gather(*tasks)
-        await asyncio.sleep(CHECK_INTERVAL)
+    async with httpx.AsyncClient(timeout=10.0) as session:
+        symbols = await fetch_symbols(session)
+
+        for symbol in symbols:
+            try:
+                klines = await fetch_kline(session, symbol)
+                if len(klines) < 32:
+                    continue
+
+                # Last 32 candles: candle[-1] is latest, candle[-2] is one before that, etc.
+                vols = [float(k[5]) for k in klines[:-2]]  # exclude last 2 candles
+                avg_vol = sum(vols[-30:]) / 30
+                candle_x = klines[-3]  # the one before last 2 candles
+                x_vol = float(candle_x[5])
+                x_high = float(candle_x[3])
+                x_low = float(candle_x[4])
+
+                c1 = klines[-2]
+                c2 = klines[-1]
+                for c in [c1, c2]:
+                    high = float(c[3])
+                    low = float(c[4])
+                    if high > x_high or low < x_low:
+                        break  # price left the range
+                else:
+                    if x_vol >= 2 * avg_vol:
+                        text = f"\u26a1 Volume Spike on {symbol}\n" \
+                               f"Volume: {x_vol:.2f} (>{2*avg_vol:.2f} avg)\n" \
+                               f"Range held for 2 min: {x_low:.4f} - {x_high:.4f}"
+                        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+            except Exception as e:
+                print(f"Error processing {symbol}: {e}")
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(monitor())
+    loop = asyncio.get_event_loop()
+    loop.create_task(safe_monitor())
+
+async def safe_monitor():
+    while True:
+        try:
+            await monitor()
+        except Exception as e:
+            print("Error in monitor():", e)
+        await asyncio.sleep(60)
 
 @app.get("/")
-def read_root():
+async def root():
     return {"status": "running"}
 
-if __name__ == "__main__":
-    uvicorn.run("bybit_volume_alert_bot:app", host="0.0.0.0", port=8000, reload=False)
+@app.get("/test")
+async def test_alert():
+    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="\u2705 Telegram bot is working!")
+    return {"status": "test message sent"}
