@@ -2,7 +2,6 @@ import asyncio
 import httpx
 from fastapi import FastAPI
 from telegram import Bot
-import os
 
 # Replace with your actual bot token and chat ID
 TELEGRAM_BOT_TOKEN = "7934074261:AAFtAdnwJKLh_iercRs-qtvqknTmLKG0vV4"
@@ -20,14 +19,14 @@ async def fetch_symbols(session):
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json"
     }
-    async with session.get(url, headers=headers) as resp:
-        resp.raise_for_status()
-        data = await resp.json()
-        symbols = [
-            i["symbol"] for i in data["result"]["list"]
-            if "USDT" in i["symbol"] and i["symbol"].endswith("USDT")
-        ]
-        return symbols
+    resp = await session.get(url, headers=headers)
+    resp.raise_for_status()
+    data = resp.json()
+    symbols = [
+        i["symbol"] for i in data["result"]["list"]
+        if "USDT" in i["symbol"] and i["symbol"].endswith("USDT")
+    ]
+    return symbols
 
 # Fetch recent kline data for a symbol
 async def fetch_kline(session, symbol):
@@ -36,10 +35,10 @@ async def fetch_kline(session, symbol):
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json"
     }
-    async with session.get(url, headers=headers) as resp:
-        resp.raise_for_status()
-        data = await resp.json()
-        return data["result"]["list"]
+    resp = await session.get(url, headers=headers)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["result"]["list"]
 
 # Core monitoring logic
 async def monitor():
