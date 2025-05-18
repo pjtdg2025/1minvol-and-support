@@ -19,14 +19,15 @@ async def fetch_symbols(session):
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json"
     }
-    resp = await session.get(url, headers=headers)
-    resp.raise_for_status()
-    data = resp.json()
-    symbols = [
-        i["symbol"] for i in data["result"]["list"]
-        if "USDT" in i["symbol"] and i["symbol"].endswith("USDT")
-    ]
-    return symbols
+    async with session.get(url, headers=headers) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+        symbols = [
+            i["symbol"] for i in data["result"]["list"]
+            if "USDT" in i["symbol"] and i["symbol"].endswith("USDT")
+        ]
+        print(f"Fetched {len(symbols)} symbols")
+        return symbols
 
 # Fetch recent kline data for a symbol
 async def fetch_kline(session, symbol):
@@ -35,29 +36,32 @@ async def fetch_kline(session, symbol):
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json"
     }
-    resp = await session.get(url, headers=headers)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["result"]["list"]
+    async with session.get(url, headers=headers) as resp:
+        resp.raise_for_status()
+        data = await resp.json()
+        return data["result"]["list"]
 
-# Core monitoring logic
+# Core monitoring logic with debug prints
 async def monitor():
     async with httpx.AsyncClient(timeout=10.0) as session:
         symbols = await fetch_symbols(session)
+        print(f"Monitoring {len(symbols)} symbols")
 
         for symbol in symbols:
             try:
                 klines = await fetch_kline(session, symbol)
                 if len(klines) < 32:
+                    print(f"Skipping {symbol}: only {len(klines)} candles")
                     continue
 
-                # Last 32 candles: candle[-1] is latest, candle[-2] is one before that, etc.
                 vols = [float(k[5]) for k in klines[:-2]]  # exclude last 2 candles
                 avg_vol = sum(vols[-30:]) / 30
-                candle_x = klines[-3]  # the one before last 2 candles
+                candle_x = klines[-3]
                 x_vol = float(candle_x[5])
                 x_high = float(candle_x[3])
                 x_low = float(candle_x[4])
+
+                print(f"Checking {symbol}: Candle X volume={x_vol:.2f}, avg_vol={avg_vol:.2f}")
 
                 c1 = klines[-2]
                 c2 = klines[-1]
@@ -65,13 +69,16 @@ async def monitor():
                     high = float(c[3])
                     low = float(c[4])
                     if high > x_high or low < x_low:
-                        break  # price left the range
+                        print(f"Price left range on {symbol} candle at {c[0]}")
+                        break
                 else:
                     if x_vol >= 2 * avg_vol:
                         text = f"\u26a1 Volume Spike on {symbol}\n" \
                                f"Volume: {x_vol:.2f} (>{2*avg_vol:.2f} avg)\n" \
                                f"Range held for 2 min: {x_low:.4f} - {x_high:.4f}"
+                        print(f"Alert triggered on {symbol}")
                         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
+
             except Exception as e:
                 print(f"Error processing {symbol}: {e}")
 
